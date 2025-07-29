@@ -1,29 +1,39 @@
-package log
+// Package logger provides structured logging functionality
+// built on top of Uber's zap logger.
+//
+// Example usage:
+//
+//	logger, err := logger.New("info")
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//	defer logger.Close()
+package logger
 
 import (
 	"errors"
+	"fmt"
 	"syscall"
 
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
 
-var (
-	// Logger is the (logger) of zap
-	Logger *zap.Logger
-	// Level is the logger level of zap
-	Level zap.AtomicLevel
+type Logger struct {
+	zap   *zap.Logger
+	level zap.AtomicLevel
+}
+
+const (
+	// logLayout is the layout of log time
+	logLayout = "2006-01-02 15:04:05.000"
 )
 
-// logLayout is the layout of log time
-const logLayout = "2006-01-02 15:04:05.000"
-
-// init: Set NewProduction as default logger. Config depend on Logger instance
-func init() {
-	var err error
-	Level = zap.NewAtomicLevel()
-	Logger, err = zap.Config{
-		Level:             Level,
+// New returns new instance of Logger
+func New(l zapcore.Level) (*Logger, error) {
+	lvl := zap.NewAtomicLevelAt(l)
+	zl, err := zap.Config{
+		Level:             lvl,
 		Development:       false,
 		Encoding:          "json",
 		DisableStacktrace: true,
@@ -46,14 +56,17 @@ func init() {
 		},
 	}.Build()
 	if err != nil {
-		panic(err)
+		return nil, fmt.Errorf("failed to create logger: %w", err)
 	}
+
+	return &Logger{zap: zl, level: lvl}, nil
 }
 
-// CloseLogger closes the logger
-func CloseLogger() error {
-	if err := Logger.Sync(); err != nil && !errors.Is(err, syscall.ENOTTY) && !errors.Is(err, syscall.EBADF) {
+// Close closes the logger
+func (l *Logger) Close() error {
+	if err := l.zap.Sync(); err != nil && !errors.Is(err, syscall.ENOTTY) && !errors.Is(err, syscall.EBADF) {
 		return err
 	}
+
 	return nil
 }
