@@ -20,7 +20,12 @@ func TimeLocationDecodeHook() mapstructure.DecodeHookFunc {
 			return data, nil
 		}
 
-		return time.LoadLocation(data.(string))
+		str, ok := data.(string)
+		if !ok {
+			return data, nil
+		}
+
+		return time.LoadLocation(str)
 	}
 }
 
@@ -36,11 +41,16 @@ func CMQTypeDecodeHook() mapstructure.DecodeHookFunc {
 			return data, nil
 		}
 
+		str, ok := data.(string)
+		if !ok {
+			return data, nil
+		}
+
 		if c, ok := map[string]CMQType{
 			CMQNatsStreaming.String(): CMQNatsStreaming,
 			CMQJetStream.String():     CMQJetStream,
 			CMQNats.String():          CMQNats,
-		}[data.(string)]; ok {
+		}[str]; ok {
 			return c, nil
 		}
 

@@ -5,14 +5,18 @@ import (
 	"time"
 )
 
+// ApplicationType represents the type of application being configured.
 type ApplicationType string
 
 const (
 	GoHabitApplicationType ApplicationType = "gohabit"
 	NoHabitApplicationType ApplicationType = "nohabit"
+
+	MySQLDriver      = "mysql"
+	PostgreSQLDriver = "postgresql"
 )
 
-// Tracing config struct
+// Tracing holds configuration for distributed tracing.
 type Tracing struct {
 	Enabled      bool    `mapstructure:"enabled"`
 	AgentHost    string  `mapstructure:"agent_host"`
@@ -92,11 +96,16 @@ const (
 
 // String is a method to convert the CMQType values to string.
 func (c CMQType) String() string {
-	return [...]string{
-		"nats_streaming",
-		"jet_stream",
-		"nats",
-	}[c]
+	switch c {
+	case CMQNatsStreaming:
+		return "nats_streaming"
+	case CMQJetStream:
+		return "jet_stream"
+	case CMQNats:
+		return "nats"
+	default:
+		return fmt.Sprintf("invalid CMQType(%d)", int(c))
+	}
 }
 
 // String represents most usable values for the NatsStreaming config
@@ -172,26 +181,31 @@ type SQLDatabase struct {
 }
 
 // DSN returns the Data Source Name for the SQLDatabase config
-func (d SQLDatabase) DSN() string {
-	if d.Driver == "mysql" {
-		return fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?parseTime=true&multiStatements=true&interpolateParams=true&"+
-			"collation=utf8mb4_general_ci", d.User, d.Password, d.Host, d.Port, d.DB)
+func (d SQLDatabase) DSN() (string, error) {
+	switch d.Driver {
+	case MySQLDriver:
+		return fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?parseTime=true&multiStatements=true&interpolateParams=true&collation=utf8mb4_general_ci",
+			d.User, d.Password, d.Host, d.Port, d.DB), nil
+	case PostgreSQLDriver:
+		return fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=disable",
+			d.User, d.Password, d.Host, d.Port, d.DB), nil
+	default:
+		return "", fmt.Errorf("unsupported database driver: %s", d.Driver)
 	}
-	if d.Driver == "postgresql" {
-		return fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=disable", d.User, d.Password, d.Host, d.Port, d.DB)
-	}
-
-	panic("SQLDatabase driver is not supported")
 }
 
 // String represents most usable values for the SQLDatabase config
 func (d SQLDatabase) String() string {
-	if d.Driver == "mysql" {
+	switch d.Driver {
+	case MySQLDriver:
 		return fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?parseTime=true&multiStatements=true&interpolateParams=true&"+
 			"collation=utf8mb4_general_ci", d.User, "***", d.Host, d.Port, d.DB)
+	case PostgreSQLDriver:
+		return fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=disable",
+			d.User, d.Password, d.Host, d.Port, d.DB)
+	default:
+		return "SQLDatabase driver is not supported"
 	}
-
-	panic("SQLDatabase driver is not supported")
 }
 
 // RabbitMQ is the RabbitMQ config structure
