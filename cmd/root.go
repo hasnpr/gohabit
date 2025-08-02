@@ -2,7 +2,7 @@
 //
 // Example:
 //
-//	$ ./rasoul start --config config.yaml
+//	$ ./gohabit start --config config.yaml
 package cmd
 
 import (
