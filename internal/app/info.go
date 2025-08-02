@@ -2,6 +2,11 @@ package app
 
 import "runtime"
 
+const (
+	// Name is the name of the Application
+	Name = "GoHabit"
+)
+
 var (
 	// Build-time variables (set via ldflags)
 	Version   = "dev"

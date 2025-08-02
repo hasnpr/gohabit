@@ -7,11 +7,6 @@ import (
 	"fmt"
 )
 
-// Name is the name of the Application
-const (
-	Name = "GoHabit"
-)
-
 const asciiArt = `
    ██████╗  ██████╗ ██╗  ██╗ █████╗ ██████╗ ██╗████████╗
   ██╔════╝ ██╔═══██╗██║  ██║██╔══██╗██╔══██╗██║╚══██╔══╝
