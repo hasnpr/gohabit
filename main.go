@@ -1,7 +1,13 @@
 package main
 
-import "github.com/hasnpr/gohabit/cmd"
+import (
+	"log"
+
+	"github.com/hasnpr/gohabit/cmd"
+)
 
 func main() {
-	cmd.Execute()
+	if err := cmd.Execute(); err != nil {
+		log.Fatalf("can't execute app. error: %v\n", err)
+	}
 }

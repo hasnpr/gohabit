@@ -17,8 +17,8 @@ var (
 	cmdLogger *logger.Logger
 
 	// Flag variables
-	cfgPath  string
-	noBanner bool
+	cfgPath    string
+	showBanner bool
 
 	// rootCMD represents the base command when called without any subcommands
 	rootCmd = &cobra.Command{
@@ -32,13 +32,13 @@ var (
 
 func init() {
 	rootCmd.PersistentFlags().StringVar(&cfgPath, "config", "", "config file path")
-	rootCmd.PersistentFlags().BoolVar(&noBanner, "no-banner", false, "hide application banner")
+	rootCmd.PersistentFlags().BoolVar(&showBanner, "show-banner", false, "show application banner")
 
 	cmdLogger = logger.NewDefault()
 }
 
 func preRun(_ *cobra.Command, _ []string) {
-	fmt.Print(app.Banner(noBanner))
+	fmt.Print(app.Banner(showBanner))
 }
 
 func postRun(_ *cobra.Command, _ []string) error {
@@ -48,9 +48,4 @@ func postRun(_ *cobra.Command, _ []string) error {
 // Execute executes the root command.
 func Execute() error {
 	return rootCmd.Execute()
-}
-
-var rootCMD = &cobra.Command{
-	Use:   "gohabit",
-	Short: "GoHabit service",
 }

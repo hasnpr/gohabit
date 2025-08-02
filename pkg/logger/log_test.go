@@ -66,7 +66,7 @@ func TestNewString(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			logger, err := NewString(tt.level)
-			
+
 			if tt.expectError {
 				if err == nil {
 					t.Errorf("NewString() expected error for level %q, got nil", tt.level)
@@ -220,10 +220,10 @@ func TestLogger_LevelFiltering(t *testing.T) {
 	defer logger.Close()
 
 	// Log at different levels using embedded methods
-	logger.Debug("debug message")  // Should be filtered out
-	logger.Info("info message")    // Should be filtered out
-	logger.Warn("warn message")    // Should appear
-	logger.Error("error message")  // Should appear
+	logger.Debug("debug message") // Should be filtered out
+	logger.Info("info message")   // Should be filtered out
+	logger.Warn("warn message")   // Should appear
+	logger.Error("error message") // Should appear
 
 	// Close writer and read output
 	w.Close()
