@@ -10,7 +10,7 @@ import (
 
 // TimeLocationDecodeHook is a function to transform time.Location values.
 func TimeLocationDecodeHook() mapstructure.DecodeHookFunc {
-	return func(f reflect.Type, t reflect.Type, data interface{}) (interface{}, error) {
+	return func(f reflect.Type, t reflect.Type, data any) (any, error) {
 		if f.Kind() != reflect.String {
 			return data, nil
 		}
@@ -31,7 +31,7 @@ func TimeLocationDecodeHook() mapstructure.DecodeHookFunc {
 
 // CMQTypeDecodeHook is a function to transform CMQType values.
 func CMQTypeDecodeHook() mapstructure.DecodeHookFunc {
-	return func(f reflect.Type, t reflect.Type, data interface{}) (interface{}, error) {
+	return func(f reflect.Type, t reflect.Type, data any) (any, error) {
 		if f.Kind() != reflect.String {
 			return data, nil
 		}
