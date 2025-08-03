@@ -109,15 +109,21 @@ func TestSupervisor_Register(t *testing.T) {
 		}
 	})
 	
-	t.Run("duplicate name registration", func(t *testing.T) {
+	t.Run("duplicate name registration should panic", func(t *testing.T) {
 		handler := func(ctx context.Context) error { return nil }
 		
-		initialCount := s.ProcessCount()
-		s.Register("test-process", handler) // Same name as above
+		defer func() {
+			if r := recover(); r == nil {
+				t.Error("Expected panic on duplicate registration")
+			} else {
+				expectedMsg := `process name "test-process" already in use`
+				if r != expectedMsg {
+					t.Errorf("Expected panic message %q, got %q", expectedMsg, r)
+				}
+			}
+		}()
 		
-		if s.ProcessCount() != initialCount {
-			t.Error("Duplicate registration should not increase process count")
-		}
+		s.Register("test-process", handler) // Same name as above - should panic
 	})
 	
 	t.Run("registration with options", func(t *testing.T) {
@@ -676,6 +682,41 @@ func TestSupervisor_WithRestartOptions(t *testing.T) {
 }
 
 // Integration Tests
+func TestSupervisor_Metrics(t *testing.T) {
+	s := createTestSupervisor(2 * time.Second)
+	
+	// Enable metrics
+	err := s.EnableMetrics()
+	if err != nil {
+		t.Fatalf("Failed to enable metrics: %v", err)
+	}
+	
+	var execCount atomic.Int32
+	handler := func(ctx context.Context) error {
+		execCount.Add(1)
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	
+	s.Register("metrics-test", handler)
+	s.Run()
+	
+	// Wait for process to start
+	time.Sleep(50 * time.Millisecond)
+	
+	// Verify process is running
+	if !s.IsRunning("metrics-test") {
+		t.Error("Process should be running")
+	}
+	
+	// Shutdown
+	s.Shutdown()
+	
+	if execCount.Load() == 0 {
+		t.Error("Process should have executed")
+	}
+}
+
 func TestSupervisor_FullLifecycle(t *testing.T) {
 	s := createTestSupervisor(2 * time.Second)
 	

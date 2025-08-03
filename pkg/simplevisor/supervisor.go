@@ -61,6 +61,7 @@ type Supervisor struct {
 	shutdownSignal  chan os.Signal
 	shutdownTimeout time.Duration
 	processWg       sync.WaitGroup // Tracks running process goroutines
+	metrics         *Metrics       // OpenTelemetry metrics (optional)
 }
 
 // New returns new instance of Supervisor.
@@ -83,7 +84,19 @@ func New(shutdownTimeout time.Duration, sLog *slog.Logger) *Supervisor {
 		processes:       make(map[string]Process),
 		shutdownSignal:  make(chan os.Signal, 1),
 		shutdownTimeout: shutdownTimeout,
+		metrics:         nil, // Metrics are optional, call EnableMetrics() to activate
 	}
+}
+
+// EnableMetrics initializes OpenTelemetry metrics for the supervisor.
+// This is optional and should be called before registering processes for best results.
+func (s *Supervisor) EnableMetrics() error {
+	metrics, err := newMetrics()
+	if err != nil {
+		return fmt.Errorf("failed to initialize metrics: %w", err)
+	}
+	s.metrics = metrics
+	return nil
 }
 
 type Option func(p *Process)
@@ -120,12 +133,9 @@ func WithRestart(policy RestartPolicy, maxRestarts int, delay time.Duration) Opt
 }
 
 // Register registers a new process to supervisor.
-// If the name isn't unique Register doesn't add process to the list.
+// Panics if the name isn't unique.
 func (s *Supervisor) Register(name string, handler ProcessFunc, options ...Option) {
-	if s.checkIfNameAlreadyInUse(name) {
-		s.logger.Warn("process name already in use, not registered", slog.String("process_name", name))
-		return
-	}
+	s.panicIfNameAlreadyInUse(name)
 
 	process := Process{
 		name:         name,
@@ -218,10 +228,12 @@ func (s *Supervisor) executeProcessWithRestart(name string, process Process) {
 		}
 
 		s.setProcessStatus(name, StatusRestarting)
+		restartCount := s.getRestartCount(name)
 		s.logger.Info("restarting process",
 			slog.String("process_name", name),
 			slog.Duration("delay", process.restartDelay),
-			slog.Int("restart_count", s.getRestartCount(name)))
+			slog.Int("restart_count", restartCount))
+		s.metrics.recordProcessRestarted(name, process.restartPolicy, restartCount)
 
 		// Wait for restart delay or shutdown signal
 		select {
@@ -240,6 +252,7 @@ func (s *Supervisor) executeProcess(name string, process Process) bool {
 		if r := recover(); r != nil {
 			panicOccurred = true
 			s.logger.Error("recover from panic", slog.String("process_name", name), slog.Any("panic", r))
+			s.metrics.recordProcessPanic(name)
 
 			if process.recoverHandler != nil {
 				process.recoverHandler(r)
@@ -249,11 +262,15 @@ func (s *Supervisor) executeProcess(name string, process Process) bool {
 
 	s.logger.Info("execute process", slog.String("process_name", name))
 	s.setProcessStatus(name, StatusRunning)
+	s.metrics.recordProcessStarted(name, process.restartPolicy)
 
 	processErr = process.handler(s.shutDownCtx)
 	if processErr != nil {
 		s.logger.Error("process execution finished", slog.String("process_name", name),
 			slog.String("error", processErr.Error()))
+		s.metrics.recordProcessStopped(name, "error")
+	} else {
+		s.metrics.recordProcessStopped(name, "success")
 	}
 
 	// Determine if we should restart based on policy
@@ -269,15 +286,14 @@ func (s *Supervisor) executeProcess(name string, process Process) bool {
 	}
 }
 
-func (s *Supervisor) checkIfNameAlreadyInUse(name string) bool {
+func (s *Supervisor) panicIfNameAlreadyInUse(name string) {
 	s.lock.Lock()
 	defer s.lock.Unlock()
 
 	if _, ok := s.processes[name]; ok {
-		return true
+		s.logger.Error("process name already in use", slog.String("process_name", name))
+		panic(fmt.Sprintf("process name %q already in use", name))
 	}
-
-	return false
 }
 
 func (s *Supervisor) gracefulShutdown() {
@@ -300,6 +316,7 @@ func (s *Supervisor) gracefulShutdown() {
 		s.logger.Info("all processes terminated gracefully")
 	case <-time.After(s.shutdownTimeout):
 		s.logger.Warn("shutdown timeout exceeded, some processes may still be running")
+		s.metrics.recordShutdownTimeout()
 	}
 
 	s.logger.Info("supervisor terminates its job.")
@@ -358,6 +375,7 @@ func (s *Supervisor) StopProcess(name string) error {
 
 	s.logger.Info("manual stop triggered", slog.String("process_name", name))
 	s.setProcessStatus(name, StatusStopped)
+	s.metrics.recordProcessStopped(name, "manual")
 	s.removeProcess(name)
 	return nil
 }
