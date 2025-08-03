@@ -10,6 +10,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"maps"
 	"os"
 	"os/signal"
 	"sync"
@@ -37,7 +38,7 @@ type Supervisor struct {
 	shutDownCtx     context.Context
 	shutDownCancel  context.CancelFunc
 	logger          *slog.Logger
-	lock            *sync.Mutex
+	lock            sync.Mutex
 	processes       map[string]Process
 	shutdownSignal  chan os.Signal
 	shutdownTimeout time.Duration
@@ -51,14 +52,14 @@ func New(shutdownTimeout time.Duration, sLog *slog.Logger) *Supervisor {
 		sLog = slog.New(slog.NewJSONHandler(io.MultiWriter(os.Stdout), nil))
 	}
 
-	if shutdownTimeout == 0 {
+	if shutdownTimeout <= 0 {
 		shutdownTimeout = DefaultGracefulShutdownTimeout
 	}
 
 	return &Supervisor{
 		shutDownCtx:     ctx,
 		shutDownCancel:  cancel,
-		lock:            &sync.Mutex{},
+		lock:            sync.Mutex{},
 		logger:          sLog.WithGroup(LogNSSupervisor),
 		processes:       make(map[string]Process),
 		shutdownSignal:  make(chan os.Signal, 1),
@@ -90,9 +91,12 @@ func WithShutdown(handler ShutdownFunc) Option {
 }
 
 // Register registers a new process to supervisor.
-// Panic if the name isn't unique.
+// If the name isn't unique Register doesn't add process to the list.
 func (s *Supervisor) Register(name string, handler ProcessFunc, options ...Option) {
-	s.panicIfNameAlreadyInUse(name)
+	if s.checkIfNameAlreadyInUse(name) {
+		s.logger.Warn("process name already in use, not registered", slog.String("process_name", name))
+		return
+	}
 
 	process := Process{
 		name:    name,
@@ -111,8 +115,13 @@ func (s *Supervisor) Register(name string, handler ProcessFunc, options ...Optio
 // Run spawns a new goroutine for each process.
 // Spawned goroutine is responsible to handle the panic.
 func (s *Supervisor) Run() {
+	s.lock.Lock()
+	processes := make(map[string]Process, len(s.processes))
+	maps.Copy(processes, s.processes)
+	s.lock.Unlock()
+
 	// there is no need to use a goroutine pool such as Ants because this goroutine is long-running.
-	for name, p := range s.processes {
+	for name, p := range processes {
 		go s.executeProcess(name, p)
 	}
 }
@@ -141,8 +150,9 @@ func (s *Supervisor) shutdown(teardown func()) {
 
 	if teardown != nil {
 		teardown()
-		s.shutDownCancel()
 	}
+
+	s.shutDownCancel()
 }
 
 func (s *Supervisor) executeProcess(name string, process Process) {
@@ -165,14 +175,15 @@ func (s *Supervisor) executeProcess(name string, process Process) {
 	}
 }
 
-func (s *Supervisor) panicIfNameAlreadyInUse(name string) {
+func (s *Supervisor) checkIfNameAlreadyInUse(name string) bool {
 	s.lock.Lock()
 	defer s.lock.Unlock()
 
 	if _, ok := s.processes[name]; ok {
-		s.logger.Error("process name already in use", slog.String("process_name", name))
-		panic("process name already in use")
+		return true
 	}
+
+	return false
 }
 
 func (s *Supervisor) gracefulShutdown() {
@@ -183,8 +194,19 @@ func (s *Supervisor) gracefulShutdown() {
 	forceExitCtx, forceExitCancel := context.WithTimeout(context.Background(), s.shutdownTimeout)
 	defer forceExitCancel()
 
-	for n, p := range s.processes {
+	s.lock.Lock()
+	processes := make(map[string]Process, len(s.processes))
+	maps.Copy(processes, s.processes)
+	processCount := len(s.processes)
+	s.lock.Unlock()
+
+	// Use Waitgroup for proper coordination
+	var wg sync.WaitGroup
+
+	for n, p := range processes {
+		wg.Add(1)
 		go func(name string, process Process) {
+			defer wg.Done()
 			if process.shutdownHandler != nil {
 				process.shutdownHandler(forceExitCtx)
 			}
@@ -194,14 +216,40 @@ func (s *Supervisor) gracefulShutdown() {
 		}(n, p)
 	}
 
-	<-forceExitCtx.Done()
+	// Wait for all shutdowns to complete or timeout
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-forceExitCtx.Done():
+	}
 
 	s.logger.Info("supervisor terminates its job.",
-		slog.Int("number_of_unfinished_processes", len(s.processes)))
+		slog.Int("number_of_unfinished_processes", processCount))
 }
 
 func (s *Supervisor) removeProcess(name string) {
 	s.lock.Lock()
 	delete(s.processes, name)
 	s.lock.Unlock()
+}
+
+func (s *Supervisor) IsRunning(name string) bool {
+	s.lock.Lock()
+	defer s.lock.Unlock()
+
+	_, exists := s.processes[name]
+
+	return exists
+}
+
+func (s *Supervisor) ProcessCount() int {
+	s.lock.Lock()
+	defer s.lock.Unlock()
+
+	return len(s.processes)
 }
