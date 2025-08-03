@@ -28,3 +28,5 @@ All architectural decisions documented here have been reviewed by:
 ### [Config Package](./decisions/config.md)
 
 ### [Using Reflection](./decisions/reflection.md)
+
+### [Simplevisor/Supervisor Package](./decisions/supervisor.md)
