@@ -8,23 +8,33 @@ import (
 	"go.opentelemetry.io/otel/metric"
 )
 
+// metricsRecorder defines the interface for recording supervisor metrics
+type metricsRecorder interface {
+	recordProcessStarted(ctx context.Context, name string, policy RestartPolicy)
+	recordProcessStopped(name string, reason string)
+	recordProcessRestarted(name string, policy RestartPolicy, restartCount int)
+	recordProcessPanic(name string)
+	recordRestartLimitExceeded(name string, maxRestarts int)
+	recordShutdownTimeout()
+}
+
 // Metrics holds all OpenTelemetry metrics for the supervisor
 type Metrics struct {
 	// General status metrics
 	processesRunning metric.Int64UpDownCounter
 	processesTotal   metric.Int64UpDownCounter
-	
-	// Critical monitoring metrics
-	processRestartCount    metric.Int64UpDownCounter
-	processStatusGauge     metric.Int64UpDownCounter
-	
+
+	// Critical monitoring metrics (using Gauges for absolute values)
+	processRestartCount metric.Int64Gauge
+	processStatusGauge  metric.Int64Gauge
+
 	// Event counters
-	processStarted     metric.Int64Counter
-	processStopped     metric.Int64Counter
-	processRestarted   metric.Int64Counter
-	processPanics      metric.Int64Counter
+	processStarted       metric.Int64Counter
+	processStopped       metric.Int64Counter
+	processRestarted     metric.Int64Counter
+	processPanics        metric.Int64Counter
 	restartLimitExceeded metric.Int64Counter
-	
+
 	// Performance metrics
 	shutdownTimeouts metric.Int64Counter
 }
@@ -32,10 +42,10 @@ type Metrics struct {
 // newMetrics creates and initializes all metrics
 func newMetrics() (*Metrics, error) {
 	meter := otel.Meter("simplevisor")
-	
+
 	var err error
 	m := &Metrics{}
-	
+
 	// General status metrics
 	m.processesRunning, err = meter.Int64UpDownCounter(
 		"simplevisor_processes_running",
@@ -44,7 +54,7 @@ func newMetrics() (*Metrics, error) {
 	if err != nil {
 		return nil, err
 	}
-	
+
 	m.processesTotal, err = meter.Int64UpDownCounter(
 		"simplevisor_processes_total",
 		metric.WithDescription("Total number of registered processes by status"),
@@ -52,24 +62,24 @@ func newMetrics() (*Metrics, error) {
 	if err != nil {
 		return nil, err
 	}
-	
-	// Critical monitoring metrics
-	m.processRestartCount, err = meter.Int64UpDownCounter(
+
+	// Critical monitoring metrics (using Gauges for absolute values)
+	m.processRestartCount, err = meter.Int64Gauge(
 		"simplevisor_process_restart_count",
 		metric.WithDescription("Current restart count for each process"),
 	)
 	if err != nil {
 		return nil, err
 	}
-	
-	m.processStatusGauge, err = meter.Int64UpDownCounter(
+
+	m.processStatusGauge, err = meter.Int64Gauge(
 		"simplevisor_process_status",
 		metric.WithDescription("Process status (1=running, 0=stopped, -1=restarting)"),
 	)
 	if err != nil {
 		return nil, err
 	}
-	
+
 	// Event counters
 	m.processStarted, err = meter.Int64Counter(
 		"simplevisor_process_started_total",
@@ -78,7 +88,7 @@ func newMetrics() (*Metrics, error) {
 	if err != nil {
 		return nil, err
 	}
-	
+
 	m.processStopped, err = meter.Int64Counter(
 		"simplevisor_process_stopped_total",
 		metric.WithDescription("Total number of process stops"),
@@ -86,7 +96,7 @@ func newMetrics() (*Metrics, error) {
 	if err != nil {
 		return nil, err
 	}
-	
+
 	m.processRestarted, err = meter.Int64Counter(
 		"simplevisor_process_restarted_total",
 		metric.WithDescription("Total number of process restarts"),
@@ -94,7 +104,7 @@ func newMetrics() (*Metrics, error) {
 	if err != nil {
 		return nil, err
 	}
-	
+
 	m.processPanics, err = meter.Int64Counter(
 		"simplevisor_process_panics_total",
 		metric.WithDescription("Total number of process panics"),
@@ -102,7 +112,7 @@ func newMetrics() (*Metrics, error) {
 	if err != nil {
 		return nil, err
 	}
-	
+
 	m.restartLimitExceeded, err = meter.Int64Counter(
 		"simplevisor_restart_limit_exceeded_total",
 		metric.WithDescription("Total number of processes that exceeded restart limits"),
@@ -110,7 +120,7 @@ func newMetrics() (*Metrics, error) {
 	if err != nil {
 		return nil, err
 	}
-	
+
 	// Performance metrics
 	m.shutdownTimeouts, err = meter.Int64Counter(
 		"simplevisor_shutdown_timeouts_total",
@@ -119,23 +129,23 @@ func newMetrics() (*Metrics, error) {
 	if err != nil {
 		return nil, err
 	}
-	
+
 	return m, nil
 }
 
 // recordProcessStarted records when a process starts
-func (m *Metrics) recordProcessStarted(name string, policy RestartPolicy) {
+func (m *Metrics) recordProcessStarted(ctx context.Context, name string, policy RestartPolicy) {
 	if m == nil {
 		return
 	}
-	
+
 	attrs := []attribute.KeyValue{
 		attribute.String("process_name", name),
 		attribute.String("restart_policy", policy.String()),
 	}
-	
-	m.processStarted.Add(context.Background(), 1, metric.WithAttributes(attrs...))
-	m.processesRunning.Add(context.Background(), 1, metric.WithAttributes(attrs...))
+
+	m.processStarted.Add(ctx, 1, metric.WithAttributes(attrs...))
+	m.processesRunning.Add(ctx, 1, metric.WithAttributes(attrs...))
 	m.updateProcessStatus(name, StatusRunning)
 }
 
@@ -144,14 +154,14 @@ func (m *Metrics) recordProcessStopped(name string, reason string) {
 	if m == nil {
 		return
 	}
-	
+
 	attrs := []attribute.KeyValue{
 		attribute.String("process_name", name),
 		attribute.String("reason", reason), // error, success, manual, shutdown
 	}
-	
+
 	m.processStopped.Add(context.Background(), 1, metric.WithAttributes(attrs...))
-	m.processesRunning.Add(context.Background(), -1, 
+	m.processesRunning.Add(context.Background(), -1,
 		metric.WithAttributes(attribute.String("process_name", name)))
 	m.updateProcessStatus(name, StatusStopped)
 }
@@ -161,12 +171,12 @@ func (m *Metrics) recordProcessRestarted(name string, policy RestartPolicy, rest
 	if m == nil {
 		return
 	}
-	
+
 	attrs := []attribute.KeyValue{
 		attribute.String("process_name", name),
 		attribute.String("restart_policy", policy.String()),
 	}
-	
+
 	m.processRestarted.Add(context.Background(), 1, metric.WithAttributes(attrs...))
 	m.updateRestartCount(name, restartCount)
 	m.updateProcessStatus(name, StatusRestarting)
@@ -177,11 +187,11 @@ func (m *Metrics) recordProcessPanic(name string) {
 	if m == nil {
 		return
 	}
-	
+
 	attrs := []attribute.KeyValue{
 		attribute.String("process_name", name),
 	}
-	
+
 	m.processPanics.Add(context.Background(), 1, metric.WithAttributes(attrs...))
 }
 
@@ -190,12 +200,12 @@ func (m *Metrics) recordRestartLimitExceeded(name string, maxRestarts int) {
 	if m == nil {
 		return
 	}
-	
+
 	attrs := []attribute.KeyValue{
 		attribute.String("process_name", name),
 		attribute.Int("max_restarts", maxRestarts),
 	}
-	
+
 	m.restartLimitExceeded.Add(context.Background(), 1, metric.WithAttributes(attrs...))
 }
 
@@ -204,7 +214,7 @@ func (m *Metrics) recordShutdownTimeout() {
 	if m == nil {
 		return
 	}
-	
+
 	m.shutdownTimeouts.Add(context.Background(), 1)
 }
 
@@ -213,12 +223,12 @@ func (m *Metrics) updateProcessStatus(name string, status ProcessStatus) {
 	if m == nil {
 		return
 	}
-	
+
 	attrs := []attribute.KeyValue{
 		attribute.String("process_name", name),
 		attribute.String("status", status.String()),
 	}
-	
+
 	var value int64
 	switch status {
 	case StatusRunning:
@@ -228,12 +238,9 @@ func (m *Metrics) updateProcessStatus(name string, status ProcessStatus) {
 	case StatusRestarting:
 		value = -1
 	}
-	
-	// Reset previous status for this process
-	m.resetProcessStatusGauge(name)
-	
-	// Set new status
-	m.processStatusGauge.Add(context.Background(), value, metric.WithAttributes(attrs...))
+
+	// Gauges record absolute values, no need to reset
+	m.processStatusGauge.Record(context.Background(), value, metric.WithAttributes(attrs...))
 }
 
 // updateRestartCount updates the restart count gauge for a process
@@ -241,15 +248,13 @@ func (m *Metrics) updateRestartCount(name string, count int) {
 	if m == nil {
 		return
 	}
-	
+
 	attrs := []attribute.KeyValue{
 		attribute.String("process_name", name),
 	}
-	
-	// Reset previous count and set new one
-	// Note: This is a simplified approach. In practice, you might want to track
-	// previous values to calculate the delta properly
-	m.processRestartCount.Add(context.Background(), int64(count), 
+
+	// Gauges record absolute values - set the current restart count
+	m.processRestartCount.Record(context.Background(), int64(count),
 		metric.WithAttributes(attrs...))
 }
 
@@ -258,44 +263,13 @@ func (m *Metrics) updateTotalProcesses(count int, status ProcessStatus) {
 	if m == nil {
 		return
 	}
-	
+
 	attrs := []attribute.KeyValue{
 		attribute.String("status", status.String()),
 	}
-	
-	m.processesTotal.Add(context.Background(), int64(count), 
-		metric.WithAttributes(attrs...))
-}
 
-// resetProcessStatusGauge resets the status gauge for a process
-// This is a helper to handle gauge updates properly
-func (m *Metrics) resetProcessStatusGauge(name string) {
-	if m == nil {
-		return
-	}
-	
-	// Reset all possible status values for this process to 0
-	statuses := []ProcessStatus{StatusRunning, StatusStopped, StatusRestarting}
-	
-	for _, status := range statuses {
-		attrs := []attribute.KeyValue{
-			attribute.String("process_name", name),
-			attribute.String("status", status.String()),
-		}
-		
-		var resetValue int64
-		switch status {
-		case StatusRunning:
-			resetValue = -1
-		case StatusStopped:
-			resetValue = 0
-		case StatusRestarting:
-			resetValue = 1
-		}
-		
-		m.processStatusGauge.Add(context.Background(), resetValue, 
-			metric.WithAttributes(attrs...))
-	}
+	m.processesTotal.Add(context.Background(), int64(count),
+		metric.WithAttributes(attrs...))
 }
 
 // String methods for enums to provide readable metric labels
@@ -324,3 +298,14 @@ func (s ProcessStatus) String() string {
 		return "unknown"
 	}
 }
+
+// noOpMetrics provides a no-operation implementation of metricsRecorder
+// Used when metrics are disabled to avoid nil pointer checks
+type noOpMetrics struct{}
+
+func (n *noOpMetrics) recordProcessStarted(ctx context.Context, name string, policy RestartPolicy) {}
+func (n *noOpMetrics) recordProcessStopped(name string, reason string)                             {}
+func (n *noOpMetrics) recordProcessRestarted(name string, policy RestartPolicy, restartCount int)  {}
+func (n *noOpMetrics) recordProcessPanic(name string)                                              {}
+func (n *noOpMetrics) recordRestartLimitExceeded(name string, maxRestarts int)                     {}
+func (n *noOpMetrics) recordShutdownTimeout()                                                      {}

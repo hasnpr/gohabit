@@ -60,8 +60,8 @@ type Supervisor struct {
 	processes       map[string]Process
 	shutdownSignal  chan os.Signal
 	shutdownTimeout time.Duration
-	processWg       sync.WaitGroup // Tracks running process goroutines
-	metrics         *Metrics       // OpenTelemetry metrics (optional)
+	processWg       sync.WaitGroup  // Tracks running process goroutines
+	metrics         metricsRecorder // Metrics recorder (NoOp by default, OpenTelemetry when enabled)
 }
 
 // New returns new instance of Supervisor.
@@ -84,7 +84,7 @@ func New(shutdownTimeout time.Duration, sLog *slog.Logger) *Supervisor {
 		processes:       make(map[string]Process),
 		shutdownSignal:  make(chan os.Signal, 1),
 		shutdownTimeout: shutdownTimeout,
-		metrics:         nil, // Metrics are optional, call EnableMetrics() to activate
+		metrics:         &noOpMetrics{}, // Default to NoOp metrics to avoid nil pointer issues
 	}
 }
 
@@ -222,6 +222,7 @@ func (s *Supervisor) executeProcessWithRestart(name string, process Process) {
 			s.logger.Error("process exceeded max restarts",
 				slog.String("process_name", name),
 				slog.Int("restart_count", s.getRestartCount(name)))
+			s.metrics.recordRestartLimitExceeded(name, process.maxRestarts)
 			s.setProcessStatus(name, StatusStopped)
 			return
 		}
@@ -261,7 +262,7 @@ func (s *Supervisor) executeProcess(name string, process Process) bool {
 
 	s.logger.Info("execute process", slog.String("process_name", name))
 	s.setProcessStatus(name, StatusRunning)
-	s.metrics.recordProcessStarted(name, process.restartPolicy)
+	s.metrics.recordProcessStarted(s.shutDownCtx, name, process.restartPolicy)
 
 	processErr = process.handler(s.shutDownCtx)
 	if processErr != nil {
@@ -321,12 +322,6 @@ func (s *Supervisor) gracefulShutdown() {
 	s.logger.Info("supervisor terminates its job.")
 }
 
-func (s *Supervisor) removeProcess(name string) {
-	s.lock.Lock()
-	delete(s.processes, name)
-	s.lock.Unlock()
-}
-
 func (s *Supervisor) IsRunning(name string) bool {
 	s.lock.Lock()
 	defer s.lock.Unlock()
@@ -344,53 +339,6 @@ func (s *Supervisor) ProcessCount() int {
 	defer s.lock.Unlock()
 
 	return len(s.processes)
-}
-
-// RestartProcess manually restarts a specific process.
-// Only restarts processes that are currently stopped. Returns an error if the process
-// is running or restarting to prevent duplicate goroutines.
-func (s *Supervisor) RestartProcess(name string) error {
-	s.lock.Lock()
-	process, exists := s.processes[name]
-	s.lock.Unlock()
-
-	if !exists {
-		return fmt.Errorf("process %s not found", name)
-	}
-	
-	// Prevent duplicate goroutines by only restarting stopped processes
-	if process.status == StatusRunning {
-		return fmt.Errorf("process %s is already running, cannot restart", name)
-	}
-	
-	if process.status == StatusRestarting {
-		return fmt.Errorf("process %s is already restarting, cannot restart", name)
-	}
-
-	s.logger.Info("manual restart triggered", slog.String("process_name", name))
-	// Reset restart count on manual restart
-	s.resetRestartCount(name)
-	// Start new instance (only for stopped processes)
-	s.processWg.Add(1)
-	go s.executeProcessWithRestart(name, process)
-	return nil
-}
-
-// StopProcess manually stops a specific process
-func (s *Supervisor) StopProcess(name string) error {
-	s.lock.Lock()
-	_, exists := s.processes[name]
-	s.lock.Unlock()
-
-	if !exists {
-		return fmt.Errorf("process %s not found", name)
-	}
-
-	s.logger.Info("manual stop triggered", slog.String("process_name", name))
-	s.setProcessStatus(name, StatusStopped)
-	s.metrics.recordProcessStopped(name, "manual")
-	s.removeProcess(name)
-	return nil
 }
 
 // GetProcessStatus returns the current status of a process

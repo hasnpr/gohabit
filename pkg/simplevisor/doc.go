@@ -57,34 +57,32 @@
 //			// Send alert, record metrics, etc.
 //		}))
 //
-// # Manual Process Control
+// # Process Monitoring
 //
-// Control processes programmatically during runtime:
+// Monitor process status during runtime:
 //
-//	// Restart a specific process (only works on stopped processes)
-//	err := supervisor.RestartProcess("worker")
-//	if err != nil {
-//		// Process might be running or restarting
-//		log.Printf("Cannot restart: %v", err)
+//	// Check if a process is currently running
+//	if supervisor.IsRunning("worker") {
+//		log.Println("Worker is active")
 //	}
 //
-//	// Stop a specific process (removes from supervisor)
-//	err := supervisor.StopProcess("worker")
-//
-//	// Check process status
+//	// Get detailed process status
 //	status, err := supervisor.GetProcessStatus("worker")
+//	if err != nil {
+//		log.Printf("Process not found: %v", err)
+//		return
+//	}
 //	switch status {
 //	case simplevisor.StatusRunning:
 //		// Process is active
 //	case simplevisor.StatusStopped:
-//		// Process has stopped (can be restarted)
+//		// Process has stopped (will restart based on policy)
 //	case simplevisor.StatusRestarting:
-//		// Process is restarting (cannot restart manually)
+//		// Process is restarting after failure/completion
 //	}
 //
-// RestartProcess only works on processes with StatusStopped to prevent
-// duplicate goroutines. Use StopProcess first if you need to force restart
-// a running process, though this removes the process entirely.
+//	// Get total number of registered processes
+//	count := supervisor.ProcessCount()
 //
 // # Graceful Shutdown
 //
@@ -127,7 +125,6 @@
 //
 // Simplevisor is thread-safe for:
 // - Process registration (before Run() is called)
-// - Manual process control (RestartProcess, StopProcess)
 // - Status queries (GetProcessStatus, IsRunning, ProcessCount)
 //
 // However, the supervisor itself should be used from the main goroutine,
@@ -141,6 +138,7 @@
 // 4. Use panic recovery for critical processes that must stay running
 // 5. Keep process handlers lightweight and delegate heavy work to other goroutines
 // 6. Always handle ctx.Done() in process main loops
+// 7. Let the supervisor manage process lifecycles - no manual start/stop needed
 //
 // # Configuration Options
 //
@@ -184,20 +182,20 @@
 // Simplevisor provides comprehensive OpenTelemetry metrics for monitoring:
 //
 //	supervisor := simplevisor.New(5*time.Second, logger)
-//	
+//
 //	// Enable metrics (optional)
 //	if err := supervisor.EnableMetrics(); err != nil {
 //		log.Fatal(err)
 //	}
 //
 // Key metrics include:
-// - simplevisor_processes_running: Currently running processes
-// - simplevisor_process_restart_count: Restart count per process  
-// - simplevisor_process_status: Process status gauge (1=running, 0=stopped, -1=restarting)
-// - simplevisor_process_started_total: Process start events
-// - simplevisor_process_stopped_total: Process stop events (by reason)
-// - simplevisor_process_panics_total: Process panic events
-// - simplevisor_restart_limit_exceeded_total: Critical restart failures
+// - simplevisor_processes_running: Currently running processes (UpDownCounter)
+// - simplevisor_process_restart_count: Current restart count per process (Gauge)
+// - simplevisor_process_status: Process status (Gauge: 1=running, 0=stopped, -1=restarting)
+// - simplevisor_process_started_total: Process start events (Counter)
+// - simplevisor_process_stopped_total: Process stop events by reason (Counter)
+// - simplevisor_process_panics_total: Process panic events (Counter)
+// - simplevisor_restart_limit_exceeded_total: Critical restart failures (Counter)
 //
 // Metrics are automatically recorded when EnableMetrics() is called.
 //
