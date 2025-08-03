@@ -61,10 +61,14 @@
 //
 // Control processes programmatically during runtime:
 //
-//	// Restart a specific process
+//	// Restart a specific process (only works on stopped processes)
 //	err := supervisor.RestartProcess("worker")
+//	if err != nil {
+//		// Process might be running or restarting
+//		log.Printf("Cannot restart: %v", err)
+//	}
 //
-//	// Stop a specific process
+//	// Stop a specific process (removes from supervisor)
 //	err := supervisor.StopProcess("worker")
 //
 //	// Check process status
@@ -73,10 +77,14 @@
 //	case simplevisor.StatusRunning:
 //		// Process is active
 //	case simplevisor.StatusStopped:
-//		// Process has stopped
+//		// Process has stopped (can be restarted)
 //	case simplevisor.StatusRestarting:
-//		// Process is restarting
+//		// Process is restarting (cannot restart manually)
 //	}
+//
+// RestartProcess only works on processes with StatusStopped to prevent
+// duplicate goroutines. Use StopProcess first if you need to force restart
+// a running process, though this removes the process entirely.
 //
 // # Graceful Shutdown
 //

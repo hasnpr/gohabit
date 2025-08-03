@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -104,8 +105,9 @@ func TestSupervisor_Register(t *testing.T) {
 			t.Errorf("Expected 1 process, got %d", s.ProcessCount())
 		}
 		
-		if !s.IsRunning("test-process") {
-			t.Error("Process should be registered")
+		// Process is registered but not running until Run() is called
+		if s.IsRunning("test-process") {
+			t.Error("Process should not be running before Run() is called")
 		}
 	})
 	
@@ -134,8 +136,9 @@ func TestSupervisor_Register(t *testing.T) {
 			WithRecover(recoverHandler),
 			WithRestart(RestartOnFailure, 5, 2*time.Second))
 		
-		if !s.IsRunning("test-with-options") {
-			t.Error("Process with options should be registered")
+		// Process is registered but not running until Run() is called
+		if s.IsRunning("test-with-options") {
+			t.Error("Process should not be running before Run() is called")
 		}
 	})
 }
@@ -331,9 +334,13 @@ func TestSupervisor_MaxRestarts(t *testing.T) {
 func TestSupervisor_ManualRestart(t *testing.T) {
 	s := createTestSupervisor(5 * time.Second)
 	
+	// Process that fails and stops naturally
 	var execCount atomic.Int32
 	handler := func(ctx context.Context) error {
-		execCount.Add(1)
+		count := execCount.Add(1)
+		if count == 1 {
+			return errors.New("process fails and stops")
+		}
 		<-ctx.Done()
 		return ctx.Err()
 	}
@@ -341,21 +348,89 @@ func TestSupervisor_ManualRestart(t *testing.T) {
 	s.Register("manual-restart-test", handler)
 	s.Run()
 	
-	// Wait for initial execution
+	// Wait for process to fail and stop
 	time.Sleep(50 * time.Millisecond)
-	initialCount := execCount.Load()
 	
-	// Manual restart
-	err := s.RestartProcess("manual-restart-test")
-	if err != nil {
-		t.Fatalf("Manual restart failed: %v", err)
+	// Process should be stopped after failure (RestartNever is default)
+	status, _ := s.GetProcessStatus("manual-restart-test")
+	if status != StatusStopped {
+		t.Errorf("Expected process to be stopped, got status %d", status)
 	}
 	
-	// Wait for restart
+	// Now manual restart should work on stopped process
+	err := s.RestartProcess("manual-restart-test")
+	if err != nil {
+		t.Fatalf("Manual restart of stopped process should work: %v", err)
+	}
+	
+	// Wait for process to start
+	waitForStatus(t, s, "manual-restart-test", StatusRunning, time.Second)
+	
+	// Test restart on running process (should fail)
+	err = s.RestartProcess("manual-restart-test")
+	if err == nil {
+		t.Error("Manual restart of running process should fail")
+	}
+	if !strings.Contains(err.Error(), "already running") {
+		t.Errorf("Expected 'already running' error, got: %v", err)
+	}
+	
+	s.Shutdown()
+}
+
+func TestSupervisor_RestartProcess_PreventDuplicates(t *testing.T) {
+	s := createTestSupervisor(5 * time.Second)
+	
+	// Process that fails multiple times to keep restarting
+	var execCount atomic.Int32
+	handler := func(ctx context.Context) error {
+		count := execCount.Add(1)
+		if count <= 2 {
+			// Fail first two times to trigger restart
+			return errors.New("execution fails")
+		}
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	
+	s.Register("restart-prevent-test", handler,
+		WithRestart(RestartOnFailure, 5, 200*time.Millisecond)) // Longer delay
+	s.Run()
+	
+	// Wait for process to fail 
 	time.Sleep(50 * time.Millisecond)
 	
-	if execCount.Load() <= initialCount {
-		t.Error("Process should have been restarted")
+	// Wait until we catch it in restarting state or it's running again
+	var foundRestarting bool
+	for i := 0; i < 10; i++ {
+		status, _ := s.GetProcessStatus("restart-prevent-test")
+		if status == StatusRestarting {
+			foundRestarting = true
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	
+	if !foundRestarting {
+		// If we couldn't catch restarting state, at least test running state
+		waitForStatus(t, s, "restart-prevent-test", StatusRunning, time.Second)
+		
+		err := s.RestartProcess("restart-prevent-test")
+		if err == nil {
+			t.Error("Manual restart of running process should fail")
+		}
+		if !strings.Contains(err.Error(), "already running") {
+			t.Errorf("Expected 'already running' error, got: %v", err)
+		}
+	} else {
+		// Try to restart while restarting (should fail)
+		err := s.RestartProcess("restart-prevent-test")
+		if err == nil {
+			t.Error("Manual restart during automatic restart should fail")
+		}
+		if !strings.Contains(err.Error(), "already restarting") {
+			t.Errorf("Expected 'already restarting' error, got: %v", err)
+		}
 	}
 	
 	s.Shutdown()
@@ -505,8 +580,10 @@ func TestSupervisor_ConcurrentOperations(t *testing.T) {
 			defer wg.Done()
 			
 			name := fmt.Sprintf("concurrent-%d", id)
+			// Check if process is running after Run() was called
+			time.Sleep(10 * time.Millisecond) // Allow time for process to start
 			if !s.IsRunning(name) {
-				t.Errorf("Process %s should be running", name)
+				t.Errorf("Process %s should be running after Run()", name)
 			}
 			
 			status, err := s.GetProcessStatus(name)
@@ -671,9 +748,9 @@ func TestSupervisor_WithRestartOptions(t *testing.T) {
 			s.Register("restart-options-test", handler,
 				WithRestart(tt.policy, tt.maxRestarts, tt.delay))
 			
-			// Verify process is registered
-			if !s.IsRunning("restart-options-test") {
-				t.Error("Process should be registered")
+			// Process is registered but not running until Run() is called
+			if s.IsRunning("restart-options-test") {
+				t.Error("Process should not be running before Run() is called")
 			}
 			
 			s.Shutdown()
@@ -682,6 +759,52 @@ func TestSupervisor_WithRestartOptions(t *testing.T) {
 }
 
 // Integration Tests
+func TestSupervisor_IsRunning(t *testing.T) {
+	s := createTestSupervisor(2 * time.Second)
+	
+	handler := func(ctx context.Context) error {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	
+	// Test with non-existent process
+	if s.IsRunning("non-existent") {
+		t.Error("Non-existent process should not be running")
+	}
+	
+	// Register process but don't run yet
+	s.Register("test-process", handler)
+	
+	// Process should not be running after registration
+	if s.IsRunning("test-process") {
+		t.Error("Process should not be running before Run() is called")
+	}
+	
+	// Start the process
+	s.Run()
+	
+	// Wait for process to start
+	waitForStatus(t, s, "test-process", StatusRunning, time.Second)
+	
+	// Now it should be running
+	if !s.IsRunning("test-process") {
+		t.Error("Process should be running after Run() is called")
+	}
+	
+	// Stop the process manually
+	err := s.StopProcess("test-process")
+	if err != nil {
+		t.Fatalf("Failed to stop process: %v", err)
+	}
+	
+	// Process should not be running after stop
+	if s.IsRunning("test-process") {
+		t.Error("Process should not be running after manual stop")
+	}
+	
+	s.Shutdown()
+}
+
 func TestSupervisor_Metrics(t *testing.T) {
 	s := createTestSupervisor(2 * time.Second)
 	
@@ -757,9 +880,13 @@ func TestSupervisor_FullLifecycle(t *testing.T) {
 	// Let it run and restart
 	time.Sleep(200 * time.Millisecond)
 	
-	// Manual restart
-	s.RestartProcess("lifecycle-test")
-	addEvent("manual-restart")
+	// Manual restart (will fail because process is running, but that's expected now)
+	err := s.RestartProcess("lifecycle-test")
+	if err != nil {
+		addEvent("manual-restart-failed") // Expected failure
+	} else {
+		addEvent("manual-restart") // Unexpected success
+	}
 	
 	time.Sleep(100 * time.Millisecond)
 	
@@ -769,13 +896,13 @@ func TestSupervisor_FullLifecycle(t *testing.T) {
 	eventsMutex.Lock()
 	defer eventsMutex.Unlock()
 	
-	// Verify expected events occurred
-	expectedEvents := []string{"execute-1", "execute-2", "manual-restart", "execute-3", "shutdown-received"}
+	// Verify expected events occurred (updated for new restart behavior)
+	expectedEvents := []string{"execute-1", "execute-2", "manual-restart-failed", "shutdown-received"}
 	if len(events) < len(expectedEvents) {
 		t.Errorf("Expected at least %d events, got %d: %v", len(expectedEvents), len(events), events)
 	}
 	
-	// Check that first execution and restart occurred
+	// Check that expected events occurred
 	found := make(map[string]bool)
 	for _, event := range events {
 		found[event] = true
@@ -786,6 +913,9 @@ func TestSupervisor_FullLifecycle(t *testing.T) {
 	}
 	if !found["execute-2"] {
 		t.Error("Should have restarted after failure")
+	}
+	if !found["manual-restart-failed"] {
+		t.Error("Manual restart should have failed (expected behavior)")
 	}
 	if !found["shutdown-received"] {
 		t.Error("Should have received shutdown signal")

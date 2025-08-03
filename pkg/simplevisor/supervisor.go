@@ -119,7 +119,6 @@ func WithRecover(handler RecoverFunc) Option {
 	}
 }
 
-
 // WithRestart sets the restart policy for the process.
 func WithRestart(policy RestartPolicy, maxRestarts int, delay time.Duration) Option {
 	return func(p *Process) {
@@ -200,7 +199,7 @@ func (s *Supervisor) shutdown(teardown func()) {
 
 func (s *Supervisor) executeProcessWithRestart(name string, process Process) {
 	defer s.processWg.Done()
-	
+
 	for {
 		select {
 		case <-s.shutDownCtx.Done():
@@ -332,9 +331,12 @@ func (s *Supervisor) IsRunning(name string) bool {
 	s.lock.Lock()
 	defer s.lock.Unlock()
 
-	_, exists := s.processes[name]
+	process, exists := s.processes[name]
+	if !exists {
+		return false
+	}
 
-	return exists
+	return process.status == StatusRunning
 }
 
 func (s *Supervisor) ProcessCount() int {
@@ -344,7 +346,9 @@ func (s *Supervisor) ProcessCount() int {
 	return len(s.processes)
 }
 
-// RestartProcess manually restarts a specific process
+// RestartProcess manually restarts a specific process.
+// Only restarts processes that are currently stopped. Returns an error if the process
+// is running or restarting to prevent duplicate goroutines.
 func (s *Supervisor) RestartProcess(name string) error {
 	s.lock.Lock()
 	process, exists := s.processes[name]
@@ -353,11 +357,20 @@ func (s *Supervisor) RestartProcess(name string) error {
 	if !exists {
 		return fmt.Errorf("process %s not found", name)
 	}
+	
+	// Prevent duplicate goroutines by only restarting stopped processes
+	if process.status == StatusRunning {
+		return fmt.Errorf("process %s is already running, cannot restart", name)
+	}
+	
+	if process.status == StatusRestarting {
+		return fmt.Errorf("process %s is already restarting, cannot restart", name)
+	}
 
 	s.logger.Info("manual restart triggered", slog.String("process_name", name))
 	// Reset restart count on manual restart
 	s.resetRestartCount(name)
-	// Start new instance
+	// Start new instance (only for stopped processes)
 	s.processWg.Add(1)
 	go s.executeProcessWithRestart(name, process)
 	return nil
