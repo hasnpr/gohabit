@@ -8,6 +8,7 @@ package simplevisor
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"maps"
@@ -20,17 +21,34 @@ import (
 
 const (
 	DefaultGracefulShutdownTimeout = 5 * time.Second
+	DefaultRestartDelay            = 1 * time.Second
+	DefaultMaxRestarts             = 3
 	LogNSSupervisor                = "supervisor"
 )
 
-// ProcessFunc is a long-running process which listens on finishSignal.
-type ProcessFunc func() error
+// RestartPolicy defines when a process should be restarted
+type RestartPolicy int
+
+const (
+	RestartNever     RestartPolicy = iota // Never restart the process
+	RestartAlways                         // Always restart the process
+	RestartOnFailure                      // Only restart on error/panic
+)
+
+// ProcessStatus represents the current state of a process
+type ProcessStatus int
+
+const (
+	StatusStopped ProcessStatus = iota
+	StatusRunning
+	StatusRestarting
+)
+
+// ProcessFunc is a long-running process which listens on context cancellation.
+type ProcessFunc func(ctx context.Context) error
 
 // RecoverFunc is a function to execute when a process panics.
 type RecoverFunc func(r any)
-
-// ShutdownFunc is a function to execute for graceful shutdown.
-type ShutdownFunc func(ctx context.Context)
 
 // Supervisor is responsible to manage long-running processes.
 // Supervisor is not for concurrent use and should be used as the main goroutine of app.
@@ -42,6 +60,7 @@ type Supervisor struct {
 	processes       map[string]Process
 	shutdownSignal  chan os.Signal
 	shutdownTimeout time.Duration
+	processWg       sync.WaitGroup // Tracks running process goroutines
 }
 
 // New returns new instance of Supervisor.
@@ -70,10 +89,14 @@ func New(shutdownTimeout time.Duration, sLog *slog.Logger) *Supervisor {
 type Option func(p *Process)
 
 type Process struct {
-	name            string
-	handler         ProcessFunc
-	recoverHandler  RecoverFunc
-	shutdownHandler ShutdownFunc
+	name           string
+	handler        ProcessFunc
+	recoverHandler RecoverFunc
+	restartPolicy  RestartPolicy
+	maxRestarts    int
+	restartDelay   time.Duration
+	restartCount   int
+	status         ProcessStatus
 }
 
 // WithRecover sets the recover handler for the process.
@@ -83,10 +106,16 @@ func WithRecover(handler RecoverFunc) Option {
 	}
 }
 
-// WithShutdown sets the shutdown handler for the process.
-func WithShutdown(handler ShutdownFunc) Option {
+
+// WithRestart sets the restart policy for the process.
+func WithRestart(policy RestartPolicy, maxRestarts int, delay time.Duration) Option {
 	return func(p *Process) {
-		p.shutdownHandler = handler
+		p.restartPolicy = policy
+		p.maxRestarts = maxRestarts
+		if delay <= 0 {
+			delay = DefaultRestartDelay
+		}
+		p.restartDelay = delay
 	}
 }
 
@@ -99,8 +128,11 @@ func (s *Supervisor) Register(name string, handler ProcessFunc, options ...Optio
 	}
 
 	process := Process{
-		name:    name,
-		handler: handler,
+		name:         name,
+		handler:      handler,
+		maxRestarts:  DefaultMaxRestarts,
+		restartDelay: DefaultRestartDelay,
+		status:       StatusStopped,
 	}
 
 	for _, option := range options {
@@ -122,7 +154,8 @@ func (s *Supervisor) Run() {
 
 	// there is no need to use a goroutine pool such as Ants because this goroutine is long-running.
 	for name, p := range processes {
-		go s.executeProcess(name, p)
+		s.processWg.Add(1)
+		go s.executeProcessWithRestart(name, p)
 	}
 }
 
@@ -155,9 +188,57 @@ func (s *Supervisor) shutdown(teardown func()) {
 	s.shutDownCancel()
 }
 
-func (s *Supervisor) executeProcess(name string, process Process) {
+func (s *Supervisor) executeProcessWithRestart(name string, process Process) {
+	defer s.processWg.Done()
+	
+	for {
+		select {
+		case <-s.shutDownCtx.Done():
+			return
+		default:
+		}
+
+		shouldRestart := s.executeProcess(name, process)
+
+		if !shouldRestart {
+			s.setProcessStatus(name, StatusStopped)
+			return
+		}
+
+		// Increment restart count
+		s.incrementRestartCount(name)
+
+		// Check if we've exceeded max restarts
+		if process.maxRestarts > 0 && s.getRestartCount(name) >= process.maxRestarts {
+			s.logger.Error("process exceeded max restarts",
+				slog.String("process_name", name),
+				slog.Int("restart_count", s.getRestartCount(name)))
+			s.setProcessStatus(name, StatusStopped)
+			return
+		}
+
+		s.setProcessStatus(name, StatusRestarting)
+		s.logger.Info("restarting process",
+			slog.String("process_name", name),
+			slog.Duration("delay", process.restartDelay),
+			slog.Int("restart_count", s.getRestartCount(name)))
+
+		// Wait for restart delay or shutdown signal
+		select {
+		case <-time.After(process.restartDelay):
+		case <-s.shutDownCtx.Done():
+			return
+		}
+	}
+}
+
+func (s *Supervisor) executeProcess(name string, process Process) bool {
+	var processErr error
+	var panicOccurred bool
+
 	defer func() {
 		if r := recover(); r != nil {
+			panicOccurred = true
 			s.logger.Error("recover from panic", slog.String("process_name", name), slog.Any("panic", r))
 
 			if process.recoverHandler != nil {
@@ -167,11 +248,24 @@ func (s *Supervisor) executeProcess(name string, process Process) {
 	}()
 
 	s.logger.Info("execute process", slog.String("process_name", name))
+	s.setProcessStatus(name, StatusRunning)
 
-	err := process.handler()
-	if err != nil {
+	processErr = process.handler(s.shutDownCtx)
+	if processErr != nil {
 		s.logger.Error("process execution finished", slog.String("process_name", name),
-			slog.String("error", err.Error()))
+			slog.String("error", processErr.Error()))
+	}
+
+	// Determine if we should restart based on policy
+	switch process.restartPolicy {
+	case RestartNever:
+		return false
+	case RestartAlways:
+		return true
+	case RestartOnFailure:
+		return processErr != nil || panicOccurred
+	default:
+		return false
 	}
 }
 
@@ -189,47 +283,26 @@ func (s *Supervisor) checkIfNameAlreadyInUse(name string) bool {
 func (s *Supervisor) gracefulShutdown() {
 	s.logger.Info("notify all processes to finish their jobs",
 		slog.Duration("shutdown_timeout", s.shutdownTimeout),
-		slog.Int("number_of_unfinished_processes", len(s.processes)))
+		slog.Int("number_of_processes", len(s.processes)))
 
-	forceExitCtx, forceExitCancel := context.WithTimeout(context.Background(), s.shutdownTimeout)
-	defer forceExitCancel()
+	// Cancel context to signal all processes to shutdown
+	s.shutDownCancel()
 
-	s.lock.Lock()
-	processes := make(map[string]Process, len(s.processes))
-	maps.Copy(processes, s.processes)
-	processCount := len(s.processes)
-	s.lock.Unlock()
-
-	// Use Waitgroup for proper coordination
-	var wg sync.WaitGroup
-
-	for n, p := range processes {
-		wg.Add(1)
-		go func(name string, process Process) {
-			defer wg.Done()
-			if process.shutdownHandler != nil {
-				process.shutdownHandler(forceExitCtx)
-			}
-
-			s.logger.Info("process terminates gracefully", slog.String("process_name", name))
-			s.removeProcess(name)
-		}(n, p)
-	}
-
-	// Wait for all shutdowns to complete or timeout
+	// Wait for all process goroutines to finish with timeout
 	done := make(chan struct{})
 	go func() {
-		wg.Wait()
+		s.processWg.Wait()
 		close(done)
 	}()
 
 	select {
 	case <-done:
-	case <-forceExitCtx.Done():
+		s.logger.Info("all processes terminated gracefully")
+	case <-time.After(s.shutdownTimeout):
+		s.logger.Warn("shutdown timeout exceeded, some processes may still be running")
 	}
 
-	s.logger.Info("supervisor terminates its job.",
-		slog.Int("number_of_unfinished_processes", processCount))
+	s.logger.Info("supervisor terminates its job.")
 }
 
 func (s *Supervisor) removeProcess(name string) {
@@ -252,4 +325,96 @@ func (s *Supervisor) ProcessCount() int {
 	defer s.lock.Unlock()
 
 	return len(s.processes)
+}
+
+// RestartProcess manually restarts a specific process
+func (s *Supervisor) RestartProcess(name string) error {
+	s.lock.Lock()
+	process, exists := s.processes[name]
+	s.lock.Unlock()
+
+	if !exists {
+		return fmt.Errorf("process %s not found", name)
+	}
+
+	s.logger.Info("manual restart triggered", slog.String("process_name", name))
+	// Reset restart count on manual restart
+	s.resetRestartCount(name)
+	// Start new instance
+	s.processWg.Add(1)
+	go s.executeProcessWithRestart(name, process)
+	return nil
+}
+
+// StopProcess manually stops a specific process
+func (s *Supervisor) StopProcess(name string) error {
+	s.lock.Lock()
+	_, exists := s.processes[name]
+	s.lock.Unlock()
+
+	if !exists {
+		return fmt.Errorf("process %s not found", name)
+	}
+
+	s.logger.Info("manual stop triggered", slog.String("process_name", name))
+	s.setProcessStatus(name, StatusStopped)
+	s.removeProcess(name)
+	return nil
+}
+
+// GetProcessStatus returns the current status of a process
+func (s *Supervisor) GetProcessStatus(name string) (ProcessStatus, error) {
+	s.lock.Lock()
+	defer s.lock.Unlock()
+
+	process, exists := s.processes[name]
+	if !exists {
+		return StatusStopped, fmt.Errorf("process %s not found", name)
+	}
+
+	return process.status, nil
+}
+
+// setProcessStatus updates the status of a process
+func (s *Supervisor) setProcessStatus(name string, status ProcessStatus) {
+	s.lock.Lock()
+	defer s.lock.Unlock()
+
+	if process, exists := s.processes[name]; exists {
+		process.status = status
+		s.processes[name] = process
+	}
+}
+
+// incrementRestartCount increments the restart counter for a process
+func (s *Supervisor) incrementRestartCount(name string) {
+	s.lock.Lock()
+	defer s.lock.Unlock()
+
+	if process, exists := s.processes[name]; exists {
+		process.restartCount++
+		s.processes[name] = process
+	}
+}
+
+// getRestartCount returns the current restart count for a process
+func (s *Supervisor) getRestartCount(name string) int {
+	s.lock.Lock()
+	defer s.lock.Unlock()
+
+	if process, exists := s.processes[name]; exists {
+		return process.restartCount
+	}
+	return 0
+}
+
+// resetRestartCount resets the restart counter for a process
+func (s *Supervisor) resetRestartCount(name string) {
+	s.lock.Lock()
+	defer s.lock.Unlock()
+
+	if process, exists := s.processes[name]; exists {
+		process.restartCount = 0
+		s.processes[name] = process
+	}
 }
