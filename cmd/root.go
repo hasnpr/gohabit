@@ -9,13 +9,10 @@ import (
 	"fmt"
 
 	"github.com/hasnpr/gohabit/internal/app"
-	"github.com/hasnpr/gohabit/pkg/logger"
 	"github.com/spf13/cobra"
 )
 
 var (
-	cmdLogger *logger.Logger
-
 	// Flag variables
 	cfgPath    string
 	showBanner bool
@@ -33,8 +30,6 @@ var (
 func init() {
 	rootCmd.PersistentFlags().StringVar(&cfgPath, "config", "", "config file path")
 	rootCmd.PersistentFlags().BoolVar(&showBanner, "show-banner", false, "show application banner")
-
-	cmdLogger = logger.NewDefault()
 }
 
 func preRun(_ *cobra.Command, _ []string) {
@@ -42,7 +37,7 @@ func preRun(_ *cobra.Command, _ []string) {
 }
 
 func postRun(_ *cobra.Command, _ []string) error {
-	return cmdLogger.Close()
+	return nil
 }
 
 // Execute executes the root command.

@@ -16,6 +16,7 @@ type metricsRecorder interface {
 	recordProcessPanic(name string)
 	recordRestartLimitExceeded(name string, maxRestarts int)
 	recordShutdownTimeout()
+	updateTotalProcesses(count int, status ProcessStatus)
 }
 
 // Metrics holds all OpenTelemetry metrics for the supervisor
@@ -309,3 +310,4 @@ func (n *noOpMetrics) recordProcessRestarted(name string, policy RestartPolicy, 
 func (n *noOpMetrics) recordProcessPanic(name string)                                              {}
 func (n *noOpMetrics) recordRestartLimitExceeded(name string, maxRestarts int)                     {}
 func (n *noOpMetrics) recordShutdownTimeout()                                                      {}
+func (n *noOpMetrics) updateTotalProcesses(count int, status ProcessStatus)                        {}

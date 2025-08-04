@@ -1,0 +1,24 @@
+version: 2
+
+run:
+  timeout: 5m
+  tests: false
+
+linters:
+  enable:
+    - errcheck
+    - unused
+    - govet
+    - staticcheck
+    - ineffassign
+    - bodyclose
+    - gosec
+
+issues:
+  exclude-rules:
+    - path: _test\.go
+      linters:
+        - errcheck
+        - gosec
+  max-issues-per-linter: 0
+  max-same-issues: 0

@@ -23,6 +23,7 @@ const (
 	DefaultGracefulShutdownTimeout = 5 * time.Second
 	DefaultRestartDelay            = 1 * time.Second
 	DefaultMaxRestarts             = 3
+	DefaultHealthyDuration         = 30 * time.Second // Duration to consider process healthy
 	LogNSSupervisor                = "supervisor"
 )
 
@@ -151,6 +152,9 @@ func (s *Supervisor) Register(name string, handler ProcessFunc, options ...Optio
 	s.lock.Lock()
 	s.processes[name] = process
 	s.lock.Unlock()
+
+	// Update total processes metric - increment stopped processes
+	s.metrics.updateTotalProcesses(1, StatusStopped)
 }
 
 // Run spawns a new goroutine for each process.
@@ -207,6 +211,7 @@ func (s *Supervisor) executeProcessWithRestart(name string, process Process) {
 		default:
 		}
 
+		startTime := time.Now()
 		shouldRestart := s.executeProcess(name, process)
 
 		if !shouldRestart {
@@ -214,8 +219,18 @@ func (s *Supervisor) executeProcessWithRestart(name string, process Process) {
 			return
 		}
 
-		// Increment restart count
-		s.incrementRestartCount(name)
+		// Check if process ran long enough to be considered healthy
+		runDuration := time.Since(startTime)
+		if runDuration >= DefaultHealthyDuration {
+			s.logger.Info("process ran successfully for healthy duration, resetting restart count",
+				slog.String("process_name", name),
+				slog.Duration("run_duration", runDuration),
+				slog.Int("previous_restart_count", s.getRestartCount(name)))
+			s.resetRestartCount(name)
+		} else {
+			// Only increment restart count if process didn't run long enough
+			s.incrementRestartCount(name)
+		}
 
 		// Check if we've exceeded max restarts
 		if process.maxRestarts > 0 && s.getRestartCount(name) >= process.maxRestarts {
@@ -360,8 +375,15 @@ func (s *Supervisor) setProcessStatus(name string, status ProcessStatus) {
 	defer s.lock.Unlock()
 
 	if process, exists := s.processes[name]; exists {
+		oldStatus := process.status
 		process.status = status
 		s.processes[name] = process
+
+		// Update metrics: decrement old status, increment new status
+		if oldStatus != status {
+			s.metrics.updateTotalProcesses(-1, oldStatus)
+			s.metrics.updateTotalProcesses(1, status)
+		}
 	}
 }
 

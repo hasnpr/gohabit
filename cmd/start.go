@@ -25,5 +25,5 @@ func init() {
 }
 
 func start(_ *cobra.Command, _ []string) {
-	app.Start(cmdLogger)
+	app.Start()
 }
